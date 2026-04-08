@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+import json
 
 import pandas as pd
 import numpy as np
@@ -15,6 +16,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, Query
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google.cloud import storage
+from google.cloud import logging as cloud_logging
 import gspread
 import math
 
@@ -24,6 +26,9 @@ from fastapi_cache.decorator import cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+client = cloud_logging.Client()
+client.setup_logging()
 
 # ---------------------------------------------------------
 # 1. State Container
@@ -169,7 +174,8 @@ class HealthRecommender:
                     'reason': 'Discovery'
                 })
 
-        return pd.DataFrame(final_recs)
+        result_df = pd.DataFrame(final_recs)
+        return result_df
 
     def get_buy_again(self, user_id: int, limit: int = 5) -> pd.DataFrame:
         state = self.state
@@ -188,7 +194,8 @@ class HealthRecommender:
         )
 
         df_hist['reason'] = 'Buy Again'
-        return df_hist[['product_id', 'sku_name', 'reason']]
+        result_df = df_hist[['product_id', 'sku_name', 'reason']]
+        return result_df
 
     def get_prescription_recs(
         self, current_diagnosis: str, anchor_product: str, age: int, gender: str, top_n: int = 5
@@ -232,13 +239,13 @@ class HealthRecommender:
         df_rec = pd.DataFrame({'product_id': candidates.index})
         df_rec['reason'] = 'Prescription based order'
 
-        # FIX: Use .copy() to avoid modifying the in-memory singleton DataFrame
         prod_list = state.product_list.copy()
         prod_list['product_id'] = pd.to_numeric(prod_list['product_id'], errors='coerce')
         df_rec['product_id'] = pd.to_numeric(df_rec['product_id'], errors='coerce')
 
         df_rec = df_rec.merge(prod_list, how='left', on='product_id').rename(columns={'product_name': 'sku_name'})
-        return df_rec[['product_id', 'sku_name', 'reason']].drop_duplicates('product_id')
+        result_df = df_rec[['product_id', 'sku_name', 'reason']].drop_duplicates('product_id')
+        return result_df
 
     def get_top_products(self, top_n: int = 200) -> pd.DataFrame:
         state = self.state
@@ -247,7 +254,8 @@ class HealthRecommender:
 
         top_products = state.top_rec.copy()
         top_products['reason'] = 'Top Product'
-        return top_products[['product_id', 'sku_name', 'reason']].head(top_n)
+        result_df = top_products[['product_id', 'sku_name', 'reason']].head(top_n)
+        return result_df
 
     def _load_promoted_sync(self) -> pd.DataFrame:
         sheet_id = '1EQpmd81YGk8lCQwceaM9dHOa2G6AHJ3_XyLRmYKnREA'
@@ -324,14 +332,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.get('/sbp_recommendations')
-@cache(expire=300)  # Caches the specific page request for 5 minutes
+@cache(expire=300)
 async def sbp_recommendations(
     page: int = Query(1, ge=1, description='Page number (starts at 1)'),
     limit: int = Query(20, ge=1, le=100, description='Items per page')
 ):
+    logger.info(f'sbp_recommendations input: page={page}, limit={limit}')
     df_sbp = rec_engine.get_sb()
 
     if df_sbp.empty:
+        logger.info(f'sbp_recommendations output: empty response')
         return {
             'data': [],
             'meta': {'total_items': 0, 'page': page, 'limit': limit, 'total_pages': 0}
@@ -345,7 +355,7 @@ async def sbp_recommendations(
 
     paginated_df = df_sbp.iloc[start_idx:end_idx]
 
-    return {
+    result = {
         'data': paginated_df.to_dict(orient='records'),
         'meta': {
             'total_items': total_items,
@@ -356,6 +366,8 @@ async def sbp_recommendations(
             'has_prev': page > 1
         }
     }
+    logger.info(f'sbp_recommendations output: {len(result["data"])} items, total_items={total_items}, total_pages={total_pages}')
+    return result
 
 
 @app.post('/recommendations')
@@ -369,7 +381,10 @@ async def get_user_recommendations(
     page: int = Query(1, ge=1, description='Page number'),
     limit: int = Query(20, ge=1, le=100, description='Items per page')
 ):
+    logger.info(f'recommendations input: user_id={user_id}, age={age}, gender={gender}, diagnosis={diagnosis}, cart_products={cart_products}, page={page}, limit={limit}')
+    
     if rec_engine.state is None:
+        logger.info('recommendations output: error - engine warming up')
         return {'error': 'Engine is warming up, please try again in a few seconds.'}
 
     buy_gn = rec_engine.get_buy_again(user_id=user_id)
@@ -387,10 +402,10 @@ async def get_user_recommendations(
         if rec_diag:
             rec_diag_all = pd.concat(rec_diag, ignore_index=True).drop_duplicates('product_id').dropna()
 
-    # FIX: Removed duplicate variable assignment 
     dfs_to_concat = [df for df in [buy_gn, hm_rec, rec_diag_all, top_prod] if not df.empty]
 
     if not dfs_to_concat:
+        logger.info(f'recommendations output: empty data')
         return {
             'data': [],
             'meta': {'total_items': 0, 'page': page, 'limit': limit, 'total_pages': 0}
@@ -405,7 +420,7 @@ async def get_user_recommendations(
     end_idx = start_idx + limit
     paginated_df = out.iloc[start_idx:end_idx]
 
-    return {
+    result = {
         'data': paginated_df.to_dict(orient='records'),
         'meta': {
             'total_items': total_items,
@@ -416,6 +431,8 @@ async def get_user_recommendations(
             'has_prev': page > 1
         }
     }
+    logger.info(f'recommendations output: {len(result["data"])} items, total_items={total_items}, total_pages={total_pages}')
+    return result
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ scikit-learn>=1.2.0
 numpy>=1.23.0
 joblib>=1.2.0
 google-cloud-storage>=2.0.0
+google-cloud-logging>=3.0.0
 pydantic>=2.0.0
 gspread>=6.2.1
 fastapi-cache2>=0.2.2
