@@ -268,7 +268,7 @@ del df, top_rec, products
 gc.collect()
 
 # Upload to cloud storage - fix undefined BUCKET_NAME
-BUCKET_NAME = os.getenv('GCS_BUCKET_NAME', 'default-bucket-name')  # Use environment variable or default
+BUCKET_NAME = os.environ['GCS_BUCKET_NAME']  # Use environment variable or default
 
 client = storage.Client(credentials=credentials)
 bucket = client.bucket(BUCKET_NAME)
