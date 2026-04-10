@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 client = cloud_logging.Client()
 client.setup_logging()
 
+
+client = storage.Client()
+bucket = client.bucket('gdt-ml-eng')
+blob = bucket.blob('important/gsheet.json')
+blob.download_to_filename('gsheet.json')
+
+
 # ---------------------------------------------------------
 # 1. State Container
 # ---------------------------------------------------------
@@ -97,14 +104,14 @@ class HealthRecommender:
         logger.info('Starting concurrent artifact load...')
 
         paths = {
-            'interaction_matrix': 'artifact_rec_engine/interaction_matrix.pkl',
-            'df_hm': 'artifact_rec_engine/df_hm.pkl',
-            'top_rec': 'artifact_rec_engine/top_rec.pkl',
-            'cmb_mat': 'artifact_rec_engine/cmb_mat.pkl',
-            'user_id_to_int': 'artifact_rec_engine/user_id_to_int.pkl',
-            'allowed_list': 'artifact_rec_engine/allowed_products.pkl',
-            'product_map': 'artifact_rec_engine/product_map.pkl',
-            'product_list': 'artifact_rec_engine/product_list.pkl'
+            'interaction_matrix': 'prod_artifact_rec_engine/interaction_matrix.pkl',
+            'df_hm': 'prod_artifact_rec_engine/df_hm.pkl',
+            'top_rec': 'prod_artifact_rec_engine/top_rec.pkl',
+            'cmb_mat': 'prod_artifact_rec_engine/cmb_mat.pkl',
+            'user_id_to_int': 'prod_artifact_rec_engine/user_id_to_int.pkl',
+            'allowed_list': 'prod_artifact_rec_engine/allowed_products.pkl',
+            'product_map': 'prod_artifact_rec_engine/product_map.pkl',
+            'product_list': 'prod_artifact_rec_engine/product_list.pkl'
         }
 
         results = {}
@@ -188,7 +195,7 @@ class HealthRecommender:
 
         df_hist = (
             df_hist
-            .sort_values('created_at', ascending=False)
+            .sort_values('order_date', ascending=False)
             .drop_duplicates('product_id', keep='first')
             .iloc[:limit]
         )
@@ -262,9 +269,9 @@ class HealthRecommender:
 
         try:
             logger.info('Fetching promoted products from Google Sheets...')
-            gc = gspread.service_account('cred_gsheet.json')
+            gc = gspread.service_account('gsheet.json')
             sht1 = gc.open_by_key(sheet_id)
-            worksheet = sht1.worksheet('Sheet1')
+            worksheet = sht1.worksheet('production')
 
             # FIX: get_all_records handles headers and empty rows safely
             records = worksheet.get_all_values(range_name = 'A1:B10000')
@@ -381,7 +388,6 @@ async def get_user_recommendations(
     page: int = Query(1, ge=1, description='Page number'),
     limit: int = Query(20, ge=1, le=100, description='Items per page')
 ):
-    logger.info(f'recommendations input: user_id={user_id}, age={age}, gender={gender}, diagnosis={diagnosis}, cart_products={cart_products}, page={page}, limit={limit}')
     
     if rec_engine.state is None:
         logger.info('recommendations output: error - engine warming up')
@@ -431,7 +437,9 @@ async def get_user_recommendations(
             'has_prev': page > 1
         }
     }
-    logger.info(f'recommendations output: {len(result["data"])} items, total_items={total_items}, total_pages={total_pages}')
+
+    logger.info(f'recommendations input: user_id={user_id}, age={age}, gender={gender}, diagnosis={diagnosis}, cart_products {cart_products}, page={page}, limit={limit}, recommendations output: {result["data"][:25]}')
+    
     return result
 
 

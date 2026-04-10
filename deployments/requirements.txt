@@ -12,3 +12,4 @@ APScheduler>=3.11.2
 pandas
 polars>=1.8.2
 pyarrow>=22.0.0
+jinja2
