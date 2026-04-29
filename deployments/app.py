@@ -128,6 +128,8 @@ class HealthRecommender:
         if df_hm is not None and not df_hm.empty:
             sku_map = df_hm.set_index('product_id')['sku_name'].to_dict()
 
+        allowed_list_str= [str(x) for x in results['allowed_list']]
+        
         logger.info('All artifacts loaded into memory.')
         return RecEngineState(
             interaction_matrix=results['interaction_matrix'],
@@ -135,7 +137,7 @@ class HealthRecommender:
             top_rec=results['top_rec'],
             cmb_mat=results['cmb_mat'],
             user_id_to_int=results['user_id_to_int'] or {},
-            allowed_list=results['allowed_list'] or [],
+            allowed_list=allowed_list_str or [],
             sku_map=sku_map,
             product_map=results['product_map'] or {},
             product_list=results['product_list']
@@ -182,6 +184,7 @@ class HealthRecommender:
                 })
 
         result_df = pd.DataFrame(final_recs)
+        result_df['product_id'] = result_df['product_id'].astype('Int64')
         return result_df
 
     def get_buy_again(self, user_id: int, limit: int = 5) -> pd.DataFrame:
@@ -202,14 +205,16 @@ class HealthRecommender:
 
         df_hist['reason'] = 'Buy Again'
         result_df = df_hist[['product_id', 'sku_name', 'reason']]
+        result_df['product_id'] = result_df['product_id'].astype('Int64')
         return result_df
 
     def get_prescription_recs(
-        self, current_diagnosis: str, anchor_product: str, age: int, gender: str, top_n: int = 5
+        self, current_diagnosis: str, anchor_product: int, age: int, gender: str, top_n: int = 5
     ) -> pd.DataFrame:
         state = self.state
         if not state or state.cmb_mat is None:
             return pd.DataFrame()
+
 
         current_diagnosis = current_diagnosis.strip().replace(' ', '').split('.')[0]
 
@@ -217,41 +222,43 @@ class HealthRecommender:
         labels = ['1', '5', '12', '19', '39', '40+']
         age_group = pd.cut([age], bins=bins, labels=labels)[0]
         group_key = f'{age_group}_{gender}'
-
+        
+        
         matrix_data = state.cmb_mat.get(group_key)
         if not matrix_data:
             return pd.DataFrame()
 
+        anchor_product_str = str(anchor_product)
+        
         mat, product_sim = matrix_data
-        if current_diagnosis not in mat.index or anchor_product not in product_sim.columns:
+        if current_diagnosis not in mat.index or anchor_product_str not in product_sim.columns:
             return pd.DataFrame()
 
-        sim_series = product_sim[anchor_product].sort_values(ascending=False)
-        sim_series = sim_series.drop(anchor_product, errors='ignore')
+    
+        sim_series = product_sim[anchor_product_str].sort_values(ascending=False)
+        sim_series = sim_series.drop(anchor_product_str, errors='ignore')
 
         diag_row = mat.loc[current_diagnosis]
         products_for_diag = diag_row[diag_row > 0].index
-
+        
         valid_candidates = (
             sim_series.index
             .intersection(set(state.allowed_list))
             .intersection(products_for_diag)
         )
-
         candidates = sim_series.loc[valid_candidates].head(top_n)
-
         if candidates.shape[0] == 0:
             return pd.DataFrame()
-
         df_rec = pd.DataFrame({'product_id': candidates.index})
         df_rec['reason'] = 'Prescription based order'
-
+        
         prod_list = state.product_list.copy()
         prod_list['product_id'] = pd.to_numeric(prod_list['product_id'], errors='coerce')
         df_rec['product_id'] = pd.to_numeric(df_rec['product_id'], errors='coerce')
 
         df_rec = df_rec.merge(prod_list, how='left', on='product_id').rename(columns={'product_name': 'sku_name'})
         result_df = df_rec[['product_id', 'sku_name', 'reason']].drop_duplicates('product_id')
+        result_df['product_id'] = result_df['product_id'].astype('Int64')
         return result_df
 
     def get_top_products(self, top_n: int = 200) -> pd.DataFrame:
@@ -262,6 +269,7 @@ class HealthRecommender:
         top_products = state.top_rec.copy()
         top_products['reason'] = 'Top Product'
         result_df = top_products[['product_id', 'sku_name', 'reason']].head(top_n)
+        result_df['product_id'] = result_df['product_id'].astype('Int64')
         return result_df
 
     def _load_promoted_sync(self) -> pd.DataFrame:
@@ -297,6 +305,7 @@ class HealthRecommender:
             df = df[['product_id', 'sku_name']]
             df['score'] = 999
             df['reason'] = 'Promoted Product'
+            df['product_id'] = df['product_id'].astype('Int64')
             logger.info(f'Loaded {len(df)} promoted products.')
             return df
 
@@ -310,7 +319,7 @@ class HealthRecommender:
             self.promoted_products = new_promo_df
             logger.info('Successfully updated promoted products state.')
 
-    def get_sb(self) -> pd.DataFrame:
+    def get_sbp(self) -> pd.DataFrame:
         return self.promoted_products
 
 # ---------------------------------------------------------
@@ -345,7 +354,7 @@ async def sbp_recommendations(
     limit: int = Query(20, ge=1, le=100, description='Items per page')
 ):
     logger.info(f'sbp_recommendations input: page={page}, limit={limit}')
-    df_sbp = rec_engine.get_sb()
+    df_sbp = rec_engine.get_sbp()
 
     if df_sbp.empty:
         logger.info(f'sbp_recommendations output: empty response')
@@ -384,7 +393,7 @@ async def get_user_recommendations(
     age: Optional[int] = None, 
     gender: Optional[str] = None,
     diagnosis: Optional[List[str]] = Query(None), 
-    cart_products: Optional[List[str]] = Query(None),
+    cart_products: Optional[List[int]] = Query(None),
     page: int = Query(1, ge=1, description='Page number'),
     limit: int = Query(20, ge=1, le=100, description='Items per page')
 ):
@@ -409,7 +418,7 @@ async def get_user_recommendations(
             rec_diag_all = pd.concat(rec_diag, ignore_index=True).drop_duplicates('product_id').dropna()
 
     dfs_to_concat = [df for df in [buy_gn, hm_rec, rec_diag_all, top_prod] if not df.empty]
-
+    #dfs_to_concat['product_id'] = dfs_to_concat['product_id'].astype('Int64')
     if not dfs_to_concat:
         logger.info(f'recommendations output: empty data')
         return {
