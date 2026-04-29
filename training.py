@@ -1,4 +1,3 @@
-who are you
 import sqlalchemy as sa
 import pandas as pd
 import numpy as np
